@@ -22,15 +22,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: BursaSearchp/bursa-project   # private: code + data live there, never here
-          ref: master
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
-          sparse-checkout: |
-            AdFactory/native/tiktok_draft.py
-            AdFactory/native/oneoff
-          sparse-checkout-cone-mode: false
+      # the deploy key was stored from Windows (CRLF), which ssh can't load - strip it
+      - name: Check out the private repo (code + data live there, never here)
+        env:
+          KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh && python3 -c "import os; open(os.path.expanduser('~/.ssh/deploy'), 'w').write(os.environ['KEY'].replace(chr(13), '').strip() + chr(10))" && chmod 600 ~/.ssh/deploy
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/deploy -o IdentitiesOnly=yes"
+          git clone -q --depth 1 -b master git@github.com:BursaSearchp/bursa-project.git .
+          git config core.sshCommand "$GIT_SSH_COMMAND"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
