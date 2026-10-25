@@ -1,0 +1,45 @@
+# Manual end-to-end check of the Instagram Reel + YouTube Short cuts. Renders, hosts and has Instagram
+# process the Reels, but never publishes (AdFactory/native/test_reels.py).
+name: Reels + Shorts test (no publish)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# rotated TikTok/Instagram tokens are written back to both repos (tiktok_draft.save_secret)
+env:
+  SECRETS_REPO: BursaSearchp/bursa-ads-runner,BursaSearchp/bursa-project
+  SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: BursaSearchp/bursa-project   # private: code + data live there, never here
+          ref: master
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          pip install pillow playwright requests pynacl imageio-ffmpeg
+          python -m playwright install --with-deps chromium
+      - name: Render, host, Instagram-process (no publish), email
+        working-directory: AdFactory/native
+        env:
+          BURSA_GMAIL_APP_PASSWORD: ${{ secrets.BURSA_GMAIL_APP_PASSWORD }}
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+          WEB_PUSH_TOKEN: ${{ secrets.WEB_PUSH_TOKEN }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: python test_reels.py

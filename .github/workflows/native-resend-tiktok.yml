@@ -1,0 +1,72 @@
+# Re-send one already-posted native post to the TikTok inbox (e.g. after a
+# transient photo_pull_failed). Rebuilds the post with its original seed to get
+# the caption, and reuses the slides already hosted at bursasearch.com/tt/<tag>/.
+#   gh workflow run native-resend-tiktok.yml --ref main -R BursaSearchp/bursa-ads-runner -f date=2026-10-03 -f slot=pm
+name: Native resend to TikTok
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Post date (YYYY-MM-DD, London)"
+        required: true
+      slot:
+        description: "am or pm"
+        required: true
+        default: pm
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-daily
+  cancel-in-progress: false
+
+# rotated TikTok/Instagram tokens are written back to both repos (tiktok_draft.save_secret)
+env:
+  SECRETS_REPO: BursaSearchp/bursa-ads-runner,BursaSearchp/bursa-project
+  SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+
+jobs:
+  resend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: BursaSearchp/bursa-project   # private: code + data live there, never here
+          ref: master
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          pip install pillow playwright requests pynacl
+          python -m playwright install --with-deps chromium
+      - name: Rebuild + send draft
+        working-directory: AdFactory/native
+        env:
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+          WEB_PUSH_TOKEN: ${{ secrets.WEB_PUSH_TOKEN }}
+          DAY: ${{ inputs.date }}
+          SLOT: ${{ inputs.slot }}
+        run: |
+          python - <<'PY'
+          import json, os
+          import engine, series, tiktok_draft
+          day, slot = os.environ["DAY"], os.environ["SLOT"]
+          e = next(e for e in json.load(open("data/posted.json"))
+                   if e["date"] == day and e.get("slot", "am") == slot)
+          tag = f"{day}-{slot}"
+          try:
+              d = engine.build(e["topic"], e["format"], seed=tag)
+          except KeyError:                      # money-first series posts (series.py)
+              d = series.build(e, seed=tag)
+          n = len(sorted(d.glob("[0-9][0-9].jpg")))
+          urls = [f"{tiktok_draft.WEB_URL}/tt/{tag}/{i:02d}.jpg" for i in range(1, n + 1)]
+          print("resend:", e["topic"], e["format"], n, "slides")
+          tiktok_draft.draft(d.name, tag, urls=urls)
+          PY

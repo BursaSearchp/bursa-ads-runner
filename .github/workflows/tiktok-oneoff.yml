@@ -1,0 +1,48 @@
+# One-off: send a hand-made post in AdFactory/native/oneoff/<name>/ (NN.jpg + caption.txt)
+# to the @bursasearch TikTok inbox as a draft. Doesn't touch posted.json or the daily slots.
+name: TikTok one-off draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Folder under AdFactory/native/oneoff/"
+        required: true
+
+permissions:
+  contents: read
+
+# rotated TikTok/Instagram tokens are written back to both repos (tiktok_draft.save_secret)
+env:
+  SECRETS_REPO: BursaSearchp/bursa-ads-runner,BursaSearchp/bursa-project
+  SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: BursaSearchp/bursa-project   # private: code + data live there, never here
+          ref: master
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          sparse-checkout: |
+            AdFactory/native/tiktok_draft.py
+            AdFactory/native/oneoff
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests pynacl
+      - name: Draft to TikTok inbox
+        working-directory: AdFactory/native
+        env:
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+          WEB_PUSH_TOKEN: ${{ secrets.WEB_PUSH_TOKEN }}
+          NAME: ${{ inputs.name }}
+        run: |
+          mkdir -p out && cp -r "oneoff/$NAME" "out/$NAME"
+          python -c "import os, datetime as dt, tiktok_draft as t; n=os.environ['NAME']; print(t.draft(n, dt.date.today().isoformat() + '-' + n))"

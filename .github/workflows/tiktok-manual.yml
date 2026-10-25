@@ -1,0 +1,43 @@
+# Send a hand-made post (AdFactory/native/manual/<post>/NN.jpg + caption.txt) to the
+# @bursasearch TikTok inbox as a draft. Isaac adds a sound and taps Post.
+name: TikTok manual draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      post:
+        description: "Folder name under AdFactory/native/manual/"
+        required: true
+
+concurrency:
+  group: tiktok-manual
+  cancel-in-progress: false
+
+# rotated TikTok/Instagram tokens are written back to both repos (tiktok_draft.save_secret)
+env:
+  SECRETS_REPO: BursaSearchp/bursa-ads-runner,BursaSearchp/bursa-project
+  SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: BursaSearchp/bursa-project   # private: code + data live there, never here
+          ref: master
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests pynacl
+      - name: Send draft
+        working-directory: AdFactory/native
+        env:
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+          WEB_PUSH_TOKEN: ${{ secrets.WEB_PUSH_TOKEN }}
+          POST: ${{ inputs.post }}
+        run: python -c "import os, tiktok_draft as t; t.OUT = t.HERE / 'manual'; p = os.environ['POST']; t.draft(p, 'manual-' + p)"

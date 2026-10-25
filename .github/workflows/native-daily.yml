@@ -1,0 +1,106 @@
+# Daily native TikTok post - picks one (topic, format) from the AdFactory/native
+# bank, renders it, emails the slides + caption, and commits the posted log so
+# nothing repeats. Runs in the cloud; the laptop can be off.
+name: Native daily post
+
+on:
+  # Three posts a day: 12:00, 16:00 and 19:00 London (12:00 added 2026-10-10). GitHub cron is UTC and regularly
+  # runs late or drops firings outright (27 Sep: both 10am firings never came),
+  # so fire several times around each slot in both BST and GMT. The gate keeps
+  # only firings inside a slot window with no post logged yet; daily_native.py
+  # waits for the exact time. Firings after the slot are catch-ups (post late
+  # rather than not at all).
+  schedule:
+    - cron: "40,50 10,11 * * *"   # 12:00 slot: BST lead 11:40/11:50, GMT lead
+    - cron: "15 12 * * *"         # 12:00 slot catch-up
+    - cron: "40,50 14,15 * * *"   # 16:00 slot: BST lead 15:40/15:50 + catch-ups, GMT lead
+    - cron: "15 16 * * *"         # 16:00 slot catch-up
+    - cron: "40,50 17,18 * * *"   # 19:00 slot: same pattern
+    - cron: "15 19,20 * * *"      # 19:00 slot catch-ups
+  workflow_dispatch:
+    inputs:
+      now:
+        description: "Post immediately (test) instead of waiting for 16:00 / 19:00"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: native-daily
+  cancel-in-progress: false
+
+# rotated TikTok/Instagram tokens are written back to both repos (tiktok_draft.save_secret)
+env:
+  SECRETS_REPO: BursaSearchp/bursa-ads-runner,BursaSearchp/bursa-project
+  SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # tip of master at job start (not the trigger commit): firings queue behind
+      # each other, so this sees the posted log a previous run just committed
+      - uses: actions/checkout@v4
+        with:
+          repository: BursaSearchp/bursa-project   # private: code + data live there, never here
+          ref: master
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+
+      - name: Gate (inside a slot window, once per slot)
+        if: github.event_name == 'schedule'
+        run: |
+          HM=$(TZ=Europe/London date +%H%M)
+          TODAY=$(TZ=Europe/London date +%F)
+          if   [ "$HM" -ge 1140 ] && [ "$HM" -lt 1535 ]; then SLOT=am
+          elif [ "$HM" -ge 1540 ] && [ "$HM" -lt 1835 ]; then SLOT=pm
+          elif [ "$HM" -ge 1835 ] && [ "$HM" -lt 2200 ]; then SLOT=eve
+          else echo "SKIP=1" >> "$GITHUB_ENV"; exit 0; fi
+          python3 - "$TODAY" "$SLOT" <<'PY' && echo "SKIP=1" >> "$GITHUB_ENV" || true
+          import json, sys
+          d, s = sys.argv[1], sys.argv[2]
+          try: L = json.load(open("AdFactory/native/data/posted.json"))
+          except Exception: L = []
+          sys.exit(0 if any(e["date"] == d and e.get("slot", "am") == s for e in L) else 1)
+          PY
+
+      - uses: actions/setup-python@v5
+        if: env.SKIP != '1'
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        if: env.SKIP != '1'
+        run: |
+          pip install pillow playwright requests pynacl imageio-ffmpeg
+          python -m playwright install --with-deps chromium
+
+      - name: Pick, render, email
+        if: env.SKIP != '1'
+        working-directory: AdFactory/native
+        env:
+          BURSA_GMAIL_APP_PASSWORD: ${{ secrets.BURSA_GMAIL_APP_PASSWORD }}
+          # TikTok inbox draft (skipped, email-only, until all four exist)
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+          WEB_PUSH_TOKEN: ${{ secrets.WEB_PUSH_TOKEN }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          # YouTube Shorts upload (skipped, Short emailed instead, until SETUP-YOUTUBE.bat has run)
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          NO_WAIT: ${{ inputs.now && '1' || '' }}
+        run: python daily_native.py
+
+      - name: Save the posted log
+        if: env.SKIP != '1'
+        run: |
+          git config user.name "ads-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add AdFactory/native/data/posted.json AdFactory/native/data/alerts.json 2>/dev/null || git add AdFactory/native/data/posted.json
+          git commit -m "chore: record native post [skip ci]" || exit 0
+          git pull --rebase origin master || true
+          git push

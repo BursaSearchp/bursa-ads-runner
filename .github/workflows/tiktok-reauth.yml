@@ -1,0 +1,37 @@
+# One-off: finish a TikTok re-authorisation (see AdFactory/native/tiktok_exchange.py).
+name: TikTok re-auth
+
+on:
+  workflow_dispatch:
+    inputs:
+      code: {description: "one-time auth code", required: true}
+      verifier: {description: "PKCE verifier", required: true}
+
+# rotated TikTok/Instagram tokens are written back to both repos (tiktok_draft.save_secret)
+env:
+  SECRETS_REPO: BursaSearchp/bursa-ads-runner,BursaSearchp/bursa-project
+  SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+
+jobs:
+  exchange:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: BursaSearchp/bursa-project   # private: code + data live there, never here
+          ref: master
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests pynacl
+      - name: Exchange code
+        working-directory: AdFactory/native
+        env:
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          WEB_PUSH_TOKEN: ${{ secrets.WEB_PUSH_TOKEN }}
+          CODE: ${{ inputs.code }}
+          VERIFIER: ${{ inputs.verifier }}
+        run: python tiktok_exchange.py
