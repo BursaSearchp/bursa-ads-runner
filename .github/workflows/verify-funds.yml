@@ -1,0 +1,80 @@
+# Nightly fund-freshness check. Re-fetches every source page (conditional GET, so
+# unchanged pages are ~free), runs pure string checks, auto-stamps anything
+# clean, and commits back a small review queue (verification_flags.csv) to the
+# PRIVATE repo for a Claude session to judge. No secrets, no LLM calls, no email.
+#
+# Runs here because public repos get free minutes (2026-10-26: the private repo's
+# ran out). Its output is only public fund pages and pass/fail counts, so the log
+# can be public; nothing is uploaded as an artifact.
+name: Verify funds
+
+on:
+  schedule:
+    - cron: "40 2 * * *"    # 02:40 UTC nightly - low-traffic window
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Ignore cache + per-URL due dates (full pass)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-funds
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      # the deploy key was stored from Windows (CRLF), which ssh can't load - strip it
+      - name: Check out the private repo (code + data live there, never here)
+        env:
+          KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh && python3 -c "import os; open(os.path.expanduser('~/.ssh/deploy'), 'w').write(os.environ['KEY'].replace(chr(13), '').strip() + chr(10))" && chmod 600 ~/.ssh/deploy
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/deploy -o IdentitiesOnly=yes"
+          git clone -q --depth 1 -b master git@github.com:BursaSearchp/bursa-project.git .
+          git config core.sshCommand "$GIT_SSH_COMMAND"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install --quiet requests beautifulsoup4
+
+      - name: Run verifier
+        working-directory: ScraperProgram
+        run: |
+          FORCE=""
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then FORCE="--force"; fi
+          python engine/verify_funds.py $FORCE --max-seconds 2700 | tee verify_run.log
+
+      - name: Queue summary -> run page
+        if: always()
+        working-directory: ScraperProgram
+        run: |
+          {
+            echo '## Fund verification'
+            echo '```'
+            sed -n '/^verify_funds/,$p' verify_run.log 2>/dev/null || echo "(no run log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit queue + cache to the private repo
+        run: |
+          git config user.name "verify-bot"
+          git config user.email "actions@users.noreply.github.com"
+          # Add each file on its own: `git add a b c` is atomic - if ONE path
+          # doesn't exist yet the whole command aborts and stages nothing.
+          for f in verification_flags.csv verification_manual_list.csv fund_verification.csv verification_ignore.csv verify_http_cache.json; do
+            git add "ScraperProgram/data+sheets/$f" || true
+          done
+          git commit -q -m "chore: nightly fund verification [skip ci]" || exit 0
+          git pull -q --rebase origin master || true
+          git push -q
