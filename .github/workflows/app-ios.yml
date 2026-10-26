@@ -1,0 +1,129 @@
+# BursaSearch iOS build, run here in the PUBLIC runner repo because public
+# repos get free Actions minutes, Macs included (2026-10-26: the private repo's
+# minutes ran out). The code stays in the private bursa-project repo and is
+# cloned with the deploy key; this repo only holds YAML.
+#
+# THE LOGS ARE PUBLIC: nothing secret is ever printed, and the .ipa is never
+# uploaded as an artifact (anyone could download it) - it goes straight to
+# App Store Connect / TestFlight. It never submits for App Review.
+#
+# Secrets: DEPLOY_KEY, ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8
+# (set by tools/app-runner/SETUP-APP-RUNNER.bat in the private repo).
+name: App - iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch of bursa-project to build"
+        default: app-without-flutterflow
+      upload:
+        description: "Upload to App Store Connect / TestFlight (otherwise just check it builds and signs)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-ios
+  cancel-in-progress: false
+
+jobs:
+  ios:
+    runs-on: macos-26   # App Store needs the iOS 26 SDK (Xcode 26) since 2026
+    timeout-minutes: 60
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+    steps:
+      # the deploy key was stored from Windows (CRLF), which ssh can't load - strip it
+      - name: Check out the private repo (the code lives there, never here)
+        env:
+          KEY: ${{ secrets.DEPLOY_KEY }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          mkdir -p ~/.ssh && python3 -c "import os; open(os.path.expanduser('~/.ssh/deploy'), 'w').write(os.environ['KEY'].replace(chr(13), '').strip() + chr(10))" && chmod 600 ~/.ssh/deploy
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/deploy -o IdentitiesOnly=yes"
+          git clone -q --depth 1 -b "$BRANCH" git@github.com:BursaSearchp/bursa-project.git .
+          git log -1 --format='Building %h %s'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.7"
+          channel: stable
+          cache: true
+
+      - name: Copy widgets from AppCode/widgets
+        working-directory: AppCode/app
+        run: python3 tool/sync.py
+
+      - name: Packages and app icons
+        working-directory: AppCode/app
+        run: |
+          flutter pub get
+          dart run flutter_launcher_icons
+
+      - name: Team ID and next build number from App Store Connect
+        id: asc
+        working-directory: AppCode/app
+        run: |
+          pip3 install --quiet --break-system-packages requests pyjwt cryptography
+          team=$(python3 tool/store_numbers.py asc-team)
+          echo "::add-mask::$team"
+          echo "team=$team" >> "$GITHUB_OUTPUT"
+          echo "build=$(python3 tool/store_numbers.py asc-next)" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$ASC_KEY_P8" > "$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8"
+
+      - name: Flutter build (unsigned)
+        working-directory: AppCode/app
+        run: flutter build ios --release --no-codesign --build-number ${{ steps.asc.outputs.build }}
+
+      - name: Archive (self-signed; the export step signs for the App Store)
+        # Archiving with automatic signing wants a *development* profile, which
+        # needs a registered iPhone. So the archive is ad-hoc signed ("-") just
+        # to carry Runner.entitlements (Sign in with Apple), and the export
+        # below re-signs it for distribution, keeping those entitlements.
+        working-directory: AppCode/app/ios
+        run: |
+          xcodebuild -workspace Runner.xcworkspace -scheme Runner -configuration Release \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" -destination 'generic/platform=iOS' \
+            DEVELOPMENT_TEAM=${{ steps.asc.outputs.team }} \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=NO PROVISIONING_PROFILE_SPECIFIER= \
+            archive > "$RUNNER_TEMP/archive.log" 2>&1 \
+            || { grep -E "error:" "$RUNNER_TEMP/archive.log"; tail -30 "$RUNNER_TEMP/archive.log"; exit 1; }
+          tail -3 "$RUNNER_TEMP/archive.log"
+
+      - name: Export${{ inputs.upload && ' and upload to App Store Connect' || '' }}
+        working-directory: AppCode/app/ios
+        run: |
+          sed -i '' "s/TEAM_ID/${{ steps.asc.outputs.team }}/" ExportOptions.plist
+          if [ "${{ inputs.upload }}" != "true" ]; then
+            /usr/libexec/PlistBuddy -c "Set :destination export" ExportOptions.plist
+          fi
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            -exportOptionsPlist ExportOptions.plist -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            > "$RUNNER_TEMP/export.log" 2>&1 \
+            || { grep -E "error:" "$RUNNER_TEMP/export.log"; tail -30 "$RUNNER_TEMP/export.log"; exit 1; }
+          tail -3 "$RUNNER_TEMP/export.log"
+
+      - name: Check signing and entitlements
+        if: ${{ !inputs.upload }}
+        run: |
+          cd "$RUNNER_TEMP" && rm -rf check && mkdir check && cd check
+          unzip -q ../export/*.ipa
+          codesign -d --entitlements - --xml Payload/Runner.app > ent.plist
+          grep -q com.apple.developer.applesignin ent.plist \
+            || { echo "::error::Sign in with Apple entitlement missing from the signed app"; exit 1; }
+          echo "Signed, with the Sign in with Apple entitlement."
+
+      - name: Remove the key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/asc" ~/.ssh/deploy

@@ -1,0 +1,119 @@
+# BursaSearch Android build, run here in the PUBLIC runner repo because public
+# repos get free Actions minutes (2026-10-26: the private repo's minutes ran
+# out). The code stays in the private bursa-project repo and is cloned with the
+# deploy key; this repo only holds YAML.
+#
+# THE LOGS ARE PUBLIC: nothing secret is ever printed, and the .aab is never
+# uploaded as an artifact (anyone could download it) - it goes straight to a
+# Play testing track. Never uploads to production: promote in Play Console.
+#
+# Secrets: DEPLOY_KEY, ANDROID_KEYSTORE_B64 / ANDROID_KEY_PASSWORD /
+# ANDROID_KEY_ALIAS, GOOGLE_SA_JSON
+# (set by tools/app-runner/SETUP-APP-RUNNER.bat in the private repo).
+name: App - Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch of bursa-project to build"
+        default: app-without-flutterflow
+      upload:
+        description: "Upload to Play (otherwise just check it builds)"
+        type: boolean
+        default: true
+      track:
+        description: "Play track"
+        type: choice
+        options: [internal, alpha]
+        default: internal
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-android
+  cancel-in-progress: false
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # the deploy key was stored from Windows (CRLF), which ssh can't load - strip it
+      - name: Check out the private repo (the code lives there, never here)
+        env:
+          KEY: ${{ secrets.DEPLOY_KEY }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          mkdir -p ~/.ssh && python3 -c "import os; open(os.path.expanduser('~/.ssh/deploy'), 'w').write(os.environ['KEY'].replace(chr(13), '').strip() + chr(10))" && chmod 600 ~/.ssh/deploy
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/deploy -o IdentitiesOnly=yes"
+          git clone -q --depth 1 -b "$BRANCH" git@github.com:BursaSearchp/bursa-project.git .
+          git log -1 --format='Building %h %s'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.7"
+          channel: stable
+          cache: true
+
+      - name: Copy widgets from AppCode/widgets
+        working-directory: AppCode/app
+        run: python tool/sync.py
+
+      - name: Packages and app icons
+        working-directory: AppCode/app
+        run: |
+          flutter pub get
+          dart run flutter_launcher_icons
+
+      - name: Next free versionCode on Play
+        id: ver
+        working-directory: AppCode/app
+        env:
+          GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
+        run: |
+          pip install --quiet google-auth requests
+          echo "code=$(python tool/store_numbers.py play-next)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload key
+        id: key
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            echo "$KS" | base64 -d > "$RUNNER_TEMP/upload-keystore.jks"
+            echo "path=$RUNNER_TEMP/upload-keystore.jks" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No ANDROID_KEYSTORE_B64 secret - building debug-signed (Play will reject it)."
+          fi
+
+      - name: Build .aab
+        working-directory: AppCode/app
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ steps.key.outputs.path }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          [ -n "$ANDROID_KEYSTORE_PATH" ] || unset ANDROID_KEYSTORE_PATH
+          flutter build appbundle --release --build-number ${{ steps.ver.outputs.code }}
+
+      - name: Upload to Play (${{ inputs.track }})
+        if: inputs.upload && steps.key.outputs.path != ''
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_SA_JSON }}
+          packageName: fresherforgev2.com
+          releaseFiles: AppCode/app/build/app/outputs/bundle/release/app-release.aab
+          track: ${{ inputs.track }}
+          status: completed
+
+      - name: Remove the keys
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/upload-keystore.jks" ~/.ssh/deploy
