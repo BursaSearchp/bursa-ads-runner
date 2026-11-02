@@ -4,13 +4,15 @@
 name: Native daily post
 
 on:
-  # Three posts a day: 12:00, 16:00 and 19:00 London (12:00 added 2026-10-10). GitHub cron is UTC and regularly
+  # Four posts a day: 09:00, 12:00, 16:00 and 19:00 London (09:00 added 2026-11-02). GitHub cron is UTC and regularly
   # runs late or drops firings outright (27 Sep: both 10am firings never came),
   # so fire several times around each slot in both BST and GMT. The gate keeps
   # only firings inside a slot window with no post logged yet; daily_native.py
   # waits for the exact time. Firings after the slot are catch-ups (post late
   # rather than not at all).
   schedule:
+    - cron: "40,50 7,8 * * *"     # 09:00 slot: BST lead 08:40/08:50, GMT lead
+    - cron: "15 9 * * *"          # 09:00 slot catch-up
     - cron: "40,50 10,11 * * *"   # 12:00 slot: BST lead 11:40/11:50, GMT lead
     - cron: "15 12 * * *"         # 12:00 slot catch-up
     - cron: "40,50 14,15 * * *"   # 16:00 slot: BST lead 15:40/15:50 + catch-ups, GMT lead
@@ -59,7 +61,8 @@ jobs:
         run: |
           HM=$(TZ=Europe/London date +%H%M)
           TODAY=$(TZ=Europe/London date +%F)
-          if   [ "$HM" -ge 1140 ] && [ "$HM" -lt 1535 ]; then SLOT=am
+          if   [ "$HM" -ge 840 ] && [ "$HM" -lt 1030 ]; then SLOT=morn
+          elif [ "$HM" -ge 1140 ] && [ "$HM" -lt 1535 ]; then SLOT=am
           elif [ "$HM" -ge 1540 ] && [ "$HM" -lt 1835 ]; then SLOT=pm
           elif [ "$HM" -ge 1835 ] && [ "$HM" -lt 2200 ]; then SLOT=eve
           else echo "SKIP=1" >> "$GITHUB_ENV"; exit 0; fi
