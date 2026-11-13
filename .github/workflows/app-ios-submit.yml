@@ -1,0 +1,24 @@
+# Submit an iOS version for App Store review, released automatically when Apple approves it
+# (Isaac 2026-11-03: releases go out automatically). Needs the build already on TestFlight
+# (App - iOS). Prints states only.
+name: App - iOS submit
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to submit (e.g. 2.0.3)"
+        required: true
+      notes:
+        description: "What's New text"
+        required: true
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install --quiet requests pyjwt cryptography
+      - run: python tools/asc_submit.py "${{ inputs.version }}" "${{ inputs.notes }}"
